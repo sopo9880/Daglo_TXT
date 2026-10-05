@@ -11,6 +11,8 @@ $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $PSScriptRoot 'browsers'
 Check-Exit
 & $Python -m unittest discover -s tests -v
 Check-Exit
+& $Python tools/verify_ui.py
+Check-Exit
 & $Python -m PyInstaller --noconfirm --clean DagloTranscriptCollector.spec
 Check-Exit
 $testData = Join-Path $PSScriptRoot 'build/smoke-data'

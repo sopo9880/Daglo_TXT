@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 [Setup]
 AppId={{50AEF5B8-BA58-4BC6-97E6-41834986854B}
@@ -25,6 +25,7 @@ CloseApplications=yes
 CloseApplicationsFilter=DagloTXT.exe
 RestartApplications=no
 SetupLogging=yes
+SetupIconFile=assets\app.ico
 UninstallDisplayIcon={app}\DagloTXT.exe
 
 [Languages]

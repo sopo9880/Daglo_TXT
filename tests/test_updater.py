@@ -9,7 +9,7 @@ from unittest.mock import patch
 from updater import Update, check_update, checksum_for, download_update, parse_release, version_tuple
 
 
-def release(version="1.2.0"):
+def release(version="1.3.0"):
     name = f"DagloTXT-Setup-{version}.exe"
     base = f"https://github.com/sopo9880/Daglo_TXT/releases/download/v{version}/"
     return {"tag_name": f"v{version}", "body": "변경 사항", "assets": [
@@ -22,7 +22,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertGreater(version_tuple("v1.10.0"), version_tuple("1.9.0"))
         self.assertIsNone(parse_release(release("1.1.0")))
         self.assertIsNone(parse_release(release("1.0.0")))
-        self.assertEqual(parse_release(release()).version, "1.2.0")
+        self.assertEqual(parse_release(release()).version, "1.3.0")
 
     def test_invalid_version(self):
         for value in ("1.2.0-beta", "../../run", "1.2", ""):

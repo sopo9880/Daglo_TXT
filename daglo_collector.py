@@ -29,6 +29,8 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 APP_TITLE = "Daglo Transcript Collector"
+from PIL import Image
+from folder_view import SORT_OPTIONS, folder_key, visible_folders
 from version import APP_VERSION
 from app_paths import data_dir, resource_dir, atomic_json, configure_browser_runtime
 from updater import check_update, download_update, launch_installer, RELEASES_URL
@@ -1242,8 +1244,8 @@ class App(ctk.CTk):
         super().__init__()
         self.cfg = load_config()
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("1100x810")
-        self.minsize(1000, 750)
+        self.geometry("1220x850")
+        self.minsize(1080, 740)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -1254,97 +1256,133 @@ class App(ctk.CTk):
 
         self.ui_queue = queue.Queue()
         self.update_busy = False
+        self._closing = False
+        self.folder_rows = {}
+        self.folder_checkboxes = []
         self._build_ui()
+        self.after(300, lambda: self.iconbitmap(str(resource_dir() / "assets" / "app.ico")))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(150, self._poll_logs)
         if self.cfg.get("auto_check_updates", True):
             self.after(2000, lambda: self.check_updates(manual=False))
 
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=0)
+        self.configure(fg_color="#0B1220")
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
+        self.font_body = ctk.CTkFont(family="맑은 고딕", size=13)
+        self.font_small = ctk.CTkFont(family="맑은 고딕", size=12)
+        self.logo_image = ctk.CTkImage(Image.open(resource_dir() / "assets" / "app.png"), size=(52, 52))
 
-        sidebar = ctk.CTkFrame(self, width=260, corner_radius=0)
+        sidebar = ctk.CTkFrame(self, width=280, corner_radius=0, fg_color="#101B2D")
         sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_rowconfigure(12, weight=1)
+        sidebar.grid_columnconfigure(0, weight=1)
+        sidebar.grid_rowconfigure(2, weight=1)
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.grid(row=0, column=0, padx=22, pady=(26, 22), sticky="ew")
+        ctk.CTkLabel(brand, text="", image=self.logo_image).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        ctk.CTkLabel(brand, text="Daglo TXT", font=ctk.CTkFont(size=23, weight="bold"), text_color="#ECF5FF", anchor="w").grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(brand, text="나만의 녹취록 보관함", font=self.font_small, text_color="#91A4BD", anchor="w").grid(row=1, column=1, sticky="w")
 
-        title = ctk.CTkLabel(sidebar, text="Daglo Collector", font=ctk.CTkFont(size=24, weight="bold"))
-        title.grid(row=0, column=0, padx=20, pady=(24, 4), sticky="w")
-        sub = ctk.CTkLabel(sidebar, text="녹취록 자동 수집기", text_color=("gray50", "gray70"))
-        sub.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
+        actions = ctk.CTkFrame(sidebar, fg_color="transparent")
+        actions.grid(row=1, column=0, padx=20, sticky="ew")
+        actions.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(actions, text="수집 시작하기", font=self.font_small, text_color="#91A4BD", anchor="w").grid(row=0, column=0, pady=(0, 10), sticky="ew")
+        secondary = dict(height=44, corner_radius=12, fg_color="#1B2B43", hover_color="#293E5C", text_color="#DAE7F7", font=self.font_body, anchor="w")
+        self.login_btn = ctk.CTkButton(actions, text="  01   로그인 브라우저 열기", command=self.login_browser, **secondary)
+        self.login_btn.grid(row=1, column=0, pady=(0, 8), sticky="ew")
+        self.scan_btn = ctk.CTkButton(actions, text="  02   폴더 스캔", command=self.scan_folders, **secondary)
+        self.scan_btn.grid(row=2, column=0, pady=(0, 8), sticky="ew")
+        self.collect_btn = ctk.CTkButton(actions, text="  03   선택 폴더 수집", command=self.collect_selected, height=48, corner_radius=12, fg_color="#65E3C1", hover_color="#43CBA8", text_color="#0D2A2C", font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"), anchor="w")
+        self.collect_btn.grid(row=3, column=0, pady=(0, 10), sticky="ew")
+        self.retry_btn = ctk.CTkButton(actions, text="기존 결과에 새 녹취록 추가", command=self.retry_missing_from_manifest, height=36, corner_radius=10, fg_color="transparent", hover_color="#1B2B43", text_color="#9FB5CE", border_width=1, border_color="#2B3C54", font=self.font_small)
+        self.retry_btn.grid(row=4, column=0, sticky="ew")
 
-        self.login_btn = ctk.CTkButton(sidebar, text="1. 로그인 브라우저 열기", command=self.login_browser)
-        self.login_btn.grid(row=2, column=0, padx=20, pady=8, sticky="ew")
-        self.scan_btn = ctk.CTkButton(sidebar, text="2. 폴더 스캔", command=self.scan_folders)
-        self.scan_btn.grid(row=3, column=0, padx=20, pady=8, sticky="ew")
-        self.collect_btn = ctk.CTkButton(sidebar, text="3. 선택 폴더 수집", command=self.collect_selected)
-        self.collect_btn.grid(row=4, column=0, padx=20, pady=8, sticky="ew")
-        self.retry_btn = ctk.CTkButton(sidebar, text="4. manifest 신규 동기화", command=self.retry_missing_from_manifest)
-        self.retry_btn.grid(row=5, column=0, padx=20, pady=8, sticky="ew")
-
-        ctk.CTkLabel(sidebar, text="브라우저", anchor="w").grid(row=6, column=0, padx=20, pady=(18, 4), sticky="ew")
-        self.browser_var = ctk.StringVar(value=self.cfg.get("browser_channel", "chrome"))
-        self.browser_menu = ctk.CTkOptionMenu(sidebar, values=["chrome", "msedge", "chromium"], variable=self.browser_var, command=self._on_browser_change)
-        self.browser_menu.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="ew")
-
-        self.headless_var = ctk.BooleanVar(value=bool(self.cfg.get("headless", False)))
-        self.headless_check = ctk.CTkCheckBox(sidebar, text="수집 시 브라우저 숨김", variable=self.headless_var, command=self._on_headless_change)
-        self.headless_check.grid(row=8, column=0, padx=20, pady=8, sticky="w")
-
-        ctk.CTkLabel(sidebar, text="저장 폴더", anchor="w").grid(row=9, column=0, padx=20, pady=(18, 4), sticky="ew")
-        out_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        out_row.grid(row=10, column=0, padx=20, pady=4, sticky="ew")
+        settings = ctk.CTkScrollableFrame(sidebar, width=230, fg_color="transparent", scrollbar_button_color="#2B3C54")
+        settings.grid(row=2, column=0, padx=16, pady=(22, 8), sticky="nsew")
+        settings.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(settings, text="수집 설정", font=ctk.CTkFont(family="맑은 고딕", size=13, weight="bold"), text_color="#DAE7F7", anchor="w").grid(row=0, column=0, pady=(0, 12), sticky="ew")
+        ctk.CTkLabel(settings, text="브라우저", font=self.font_small, text_color="#91A4BD", anchor="w").grid(row=1, column=0, pady=(0, 6), sticky="ew")
+        self.browser_var = ctk.StringVar(value=self.cfg.get("browser_channel", "chromium"))
+        self.browser_menu = ctk.CTkOptionMenu(settings, values=["chromium", "chrome", "msedge"], variable=self.browser_var, command=self._on_browser_change, height=36, corner_radius=10, fg_color="#1B2B43", button_color="#293E5C", button_hover_color="#345172")
+        self.browser_menu.grid(row=2, column=0, sticky="ew")
+        self.headless_var = ctk.BooleanVar(value=bool(self.cfg.get("headless", True)))
+        check_style = dict(font=self.font_small, checkbox_width=18, checkbox_height=18, corner_radius=5, border_width=2, fg_color="#3FBCA5", hover_color="#319E8B", border_color="#425775", text_color="#BFD0E4")
+        self.headless_check = ctk.CTkCheckBox(settings, text="수집 시 브라우저 숨김", variable=self.headless_var, command=self._on_headless_change, **check_style)
+        self.headless_check.grid(row=3, column=0, pady=(12, 18), sticky="w")
+        ctk.CTkLabel(settings, text="저장 폴더", font=self.font_small, text_color="#91A4BD", anchor="w").grid(row=4, column=0, pady=(0, 6), sticky="ew")
+        out_row = ctk.CTkFrame(settings, fg_color="transparent")
+        out_row.grid(row=5, column=0, sticky="ew")
         out_row.grid_columnconfigure(0, weight=1)
-        self.out_entry = ctk.CTkEntry(out_row)
+        self.out_entry = ctk.CTkEntry(out_row, height=36, corner_radius=10, border_color="#2B3C54", fg_color="#0D1728", font=self.font_small)
         self.out_entry.insert(0, str(self.cfg.get("output_dir", "output")))
         self.out_entry.grid(row=0, column=0, sticky="ew")
-        self.browse_btn = ctk.CTkButton(out_row, text="...", width=42, command=self.pick_output_dir)
+        self.browse_btn = ctk.CTkButton(out_row, text="찾기", width=48, height=36, corner_radius=10, fg_color="#293E5C", hover_color="#345172", font=self.font_small, command=self.pick_output_dir)
         self.browse_btn.grid(row=0, column=1, padx=(6, 0))
-
         self.zip_var = ctk.BooleanVar(value=bool(self.cfg.get("zip_after_collect", True)))
-        self.zip_check = ctk.CTkCheckBox(sidebar, text="완료 후 ZIP 생성", variable=self.zip_var, command=self._on_zip_change)
-        self.zip_check.grid(row=11, column=0, padx=20, pady=8, sticky="w")
+        self.zip_check = ctk.CTkCheckBox(settings, text="완료 후 ZIP 생성", variable=self.zip_var, command=self._on_zip_change, **check_style)
+        self.zip_check.grid(row=6, column=0, pady=(12, 8), sticky="w")
 
-        self.status_label = ctk.CTkLabel(sidebar, text="대기 중", anchor="w", text_color=("gray40", "gray70"))
-        self.status_label.grid(row=13, column=0, padx=20, pady=(10, 8), sticky="ew")
-        self.update_btn = ctk.CTkButton(sidebar, text=f"업데이트 확인 · v{APP_VERSION}", command=self.check_updates)
-        self.update_btn.grid(row=14, column=0, padx=20, pady=6, sticky="ew")
+        footer = ctk.CTkFrame(sidebar, fg_color="transparent")
+        footer.grid(row=3, column=0, padx=20, pady=(8, 20), sticky="ew")
+        footer.grid_columnconfigure(0, weight=1)
+        self.update_btn = ctk.CTkButton(footer, text=f"업데이트 확인  ·  v{APP_VERSION}", command=self.check_updates, height=34, corner_radius=10, fg_color="#1B2B43", hover_color="#293E5C", text_color="#BFD0E4", font=self.font_small)
+        self.update_btn.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.auto_update_var = ctk.BooleanVar(value=self.cfg.get("auto_check_updates", True))
-        self.auto_update_check = ctk.CTkCheckBox(sidebar, text="시작할 때 새 버전 확인", variable=self.auto_update_var, command=self._save_cfg_from_ui)
-        self.auto_update_check.grid(row=15, column=0, padx=20, pady=(4, 16), sticky="w")
+        self.auto_update_check = ctk.CTkCheckBox(footer, text="시작할 때 새 버전 확인", variable=self.auto_update_var, command=self._save_cfg_from_ui, **check_style)
+        self.auto_update_check.grid(row=1, column=0, sticky="w")
 
-        main = ctk.CTkFrame(self)
-        main.grid(row=0, column=1, padx=18, pady=18, sticky="nsew")
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=0, column=1, padx=28, pady=26, sticky="nsew")
         main.grid_columnconfigure(0, weight=1)
-        main.grid_rowconfigure(2, weight=1)
-        main.grid_rowconfigure(5, weight=1)
+        main.grid_rowconfigure(1, weight=1)
+        hero = ctk.CTkFrame(main, fg_color="transparent")
+        hero.grid(row=0, column=0, sticky="ew", pady=(0, 22))
+        hero.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(hero, text="녹취록을 한곳에.", font=ctk.CTkFont(family="맑은 고딕", size=28, weight="bold"), text_color="#ECF5FF", anchor="w").grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(hero, text="로그인한 뒤 폴더를 선택하면 TXT와 ZIP으로 보관할 수 있어요.", font=self.font_body, text_color="#91A4BD", anchor="w").grid(row=1, column=0, pady=(7, 0), sticky="w")
+        self.selection_label = ctk.CTkLabel(hero, text="0개 선택", height=36, corner_radius=12, fg_color="#193C3D", text_color="#83ECCD", font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"))
+        self.selection_label.grid(row=0, column=1, padx=(16, 0), ipadx=14, sticky="e")
 
-        header = ctk.CTkLabel(main, text="폴더 선택", font=ctk.CTkFont(size=20, weight="bold"), anchor="w")
-        header.grid(row=0, column=0, padx=18, pady=(18, 6), sticky="ew")
-        guide = ctk.CTkLabel(
-            main,
-            text="1번 로그인 후 폴더를 수집하세요. 4번은 기존 manifest를 기준으로 사이트에 새로 추가된 녹취록만 가져옵니다.",
-            text_color=("gray45", "gray70"), anchor="w"
-        )
-        guide.grid(row=1, column=0, padx=18, pady=(0, 8), sticky="ew")
+        library = ctk.CTkFrame(main, fg_color="#131F32", corner_radius=18, border_width=1, border_color="#26354D")
+        library.grid(row=1, column=0, sticky="nsew")
+        library.grid_columnconfigure(0, weight=1)
+        library.grid_rowconfigure(2, weight=1)
+        heading = ctk.CTkFrame(library, fg_color="transparent")
+        heading.grid(row=0, column=0, padx=20, pady=(17, 10), sticky="ew")
+        ctk.CTkLabel(heading, text="폴더 선택", font=ctk.CTkFont(family="맑은 고딕", size=18, weight="bold"), text_color="#ECF5FF").pack(side="left")
+        self.folder_total_label = ctk.CTkLabel(heading, text="전체 0개", font=self.font_small, text_color="#91A4BD")
+        self.folder_total_label.pack(side="left", padx=12)
+        self.clear_btn = ctk.CTkButton(heading, text="선택 해제", width=76, height=30, corner_radius=8, fg_color="transparent", hover_color="#293E5C", text_color="#9FB5CE", font=self.font_small, command=self.clear_selection)
+        self.clear_btn.pack(side="right")
+        self.select_all_btn = ctk.CTkButton(heading, text="전체 선택", width=76, height=30, corner_radius=8, fg_color="#293E5C", hover_color="#345172", font=self.font_small, command=self.select_all)
+        self.select_all_btn.pack(side="right", padx=6)
+        toolbar = ctk.CTkFrame(library, fg_color="transparent")
+        toolbar.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        toolbar.grid_columnconfigure(0, weight=1)
+        self.search_var = ctk.StringVar(value="")
+        self.search_entry = ctk.CTkEntry(toolbar, textvariable=self.search_var, placeholder_text="폴더 이름 검색", height=38, corner_radius=10, fg_color="#0D1728", border_color="#2B3C54", font=self.font_body)
+        self.search_entry.grid(row=0, column=0, sticky="ew")
+        order = self.cfg.get("folder_sort", SORT_OPTIONS[0])
+        self.sort_var = ctk.StringVar(value=order if order in SORT_OPTIONS else SORT_OPTIONS[0])
+        self.sort_menu = ctk.CTkOptionMenu(toolbar, values=list(SORT_OPTIONS), variable=self.sort_var, command=self._on_sort_change, width=166, height=38, corner_radius=10, fg_color="#23354F", button_color="#2C4463", button_hover_color="#345172", font=self.font_small, dropdown_font=self.font_small)
+        self.sort_menu.grid(row=0, column=1, padx=(10, 0))
+        self.folder_frame = ctk.CTkScrollableFrame(library, height=250, fg_color="#131F32", corner_radius=0, scrollbar_button_color="#2B3C54")
+        self.folder_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="nsew")
+        self.folder_frame.grid_columnconfigure(0, weight=1)
+        self.search_var.trace_add("write", lambda *_: self._refresh_folder_list())
 
-        self.folder_frame = ctk.CTkScrollableFrame(main, height=210)
-        self.folder_frame.grid(row=2, column=0, padx=18, pady=8, sticky="nsew")
-
-        btn_row = ctk.CTkFrame(main, fg_color="transparent")
-        btn_row.grid(row=3, column=0, padx=18, pady=(4, 4), sticky="ew")
-        self.select_all_btn = ctk.CTkButton(btn_row, text="전체 선택", width=100, command=self.select_all)
-        self.select_all_btn.pack(side="left", padx=(0, 8))
-        self.clear_btn = ctk.CTkButton(btn_row, text="선택 해제", width=100, command=self.clear_selection)
-        self.clear_btn.pack(side="left")
-
-        log_label = ctk.CTkLabel(main, text="작업 로그", font=ctk.CTkFont(size=18, weight="bold"), anchor="w")
-        log_label.grid(row=4, column=0, padx=18, pady=(16, 4), sticky="sw")
-        self.log_box = ctk.CTkTextbox(main, height=230)
-        self.log_box.grid(row=5, column=0, padx=18, pady=(0, 18), sticky="nsew")
-        self.log_box.insert("end", "준비 완료.\n")
+        activity = ctk.CTkFrame(main, fg_color="#101B2D", corner_radius=16, border_width=1, border_color="#26354D")
+        activity.grid(row=2, column=0, pady=(18, 0), sticky="ew")
+        activity.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(activity, text="작업 기록", font=ctk.CTkFont(family="맑은 고딕", size=14, weight="bold"), text_color="#DAE7F7", anchor="w").grid(row=0, column=0, padx=18, pady=(12, 4), sticky="w")
+        self.status_label = ctk.CTkLabel(activity, text="준비 완료", font=self.font_small, text_color="#65E3C1", anchor="e")
+        self.status_label.grid(row=0, column=1, padx=18, pady=(12, 4), sticky="e")
+        self.log_box = ctk.CTkTextbox(activity, height=138, corner_radius=10, fg_color="#0D1728", text_color="#A7BED8", font=ctk.CTkFont(family="맑은 고딕", size=12))
+        self.log_box.grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 12), sticky="ew")
+        self.log_box.insert("end", "로그인 브라우저에서 로그인 후 창을 닫고, 폴더 스캔을 눌러 주세요.\n")
         self.log_box.configure(state="disabled")
+        self._refresh_folder_list()
 
     def _log(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -1357,6 +1395,8 @@ class App(ctk.CTk):
             except queue.Empty:
                 break
             callback()
+            if self._closing:
+                return
         changed = False
         while True:
             try:
@@ -1397,14 +1437,17 @@ class App(ctk.CTk):
 
     def _set_buttons(self, enabled: bool):
         state = "normal" if enabled else "disabled"
-        for b in [self.login_btn, self.scan_btn, self.collect_btn, self.retry_btn, self.select_all_btn, self.clear_btn, self.browse_btn, self.browser_menu, self.headless_check, self.zip_check, self.out_entry, self.update_btn]:
+        for b in [self.login_btn, self.scan_btn, self.collect_btn, self.retry_btn, self.select_all_btn, self.clear_btn, self.browse_btn, self.browser_menu, self.headless_check, self.zip_check, self.out_entry, self.update_btn, self.search_entry, self.sort_menu, self.auto_update_check, *self.folder_checkboxes]:
             b.configure(state=state)
+        if enabled:
+            self._update_selection_summary()
 
     def _save_cfg_from_ui(self):
         self.cfg["browser_channel"] = self.browser_var.get()
         self.cfg["headless"] = bool(self.headless_var.get())
         self.cfg["output_dir"] = self.out_entry.get().strip() or "output"
         self.cfg["zip_after_collect"] = bool(self.zip_var.get())
+        self.cfg["folder_sort"] = self.sort_var.get()
         self.cfg["auto_check_updates"] = bool(self.auto_update_var.get())
         save_config(self.cfg)
 
@@ -1431,6 +1474,7 @@ class App(ctk.CTk):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("작업 진행 중", "현재 작업이 끝난 뒤 종료하세요. 완료된 항목은 manifest에 저장됩니다.")
             return
+        self._closing = True
         self.destroy()
 
     def check_updates(self, manual=True):
@@ -1515,6 +1559,7 @@ class App(ctk.CTk):
         except Exception as error:
             self._update_error(error)
             return
+        self._closing = True
         self.destroy()
 
     def login_browser(self):
@@ -1530,26 +1575,74 @@ class App(ctk.CTk):
         self._run_worker("폴더 스캔", task)
 
     def _render_folders(self):
+        previous = {folder_key(f): var for var, f in self.folder_vars}
+        self.folder_vars = [(previous.get(folder_key(f)) or ctk.BooleanVar(value=True), f) for f in self.folders]
+        self._refresh_folder_list()
+
+    def _on_sort_change(self, _=None):
+        self._save_cfg_from_ui()
+        self._refresh_folder_list()
+
+    def _refresh_folder_list(self):
         for widget in self.folder_frame.winfo_children():
             widget.destroy()
-        self.folder_vars.clear()
-        if not self.folders:
-            ctk.CTkLabel(self.folder_frame, text="폴더가 없습니다. 로그인 상태를 확인하세요.").pack(anchor="w", padx=10, pady=10)
-            return
-        for f in self.folders:
-            var = ctk.BooleanVar(value=True)
-            label = f"{f.name}  ({f.folder_id})" if f.folder_id and f.folder_id not in f.name else f.name
-            cb = ctk.CTkCheckBox(self.folder_frame, text=label, variable=var)
-            cb.pack(anchor="w", padx=12, pady=6)
-            self.folder_vars.append((var, f))
+        self.folder_rows.clear()
+        self.folder_checkboxes.clear()
+        selected = {folder_key(f) for var, f in self.folder_vars if var.get()}
+        visible = visible_folders(self.folders, selected, self.sort_var.get(), self.search_var.get())
+        variables = {folder_key(f): var for var, f in self.folder_vars}
+        if not visible:
+            title = "검색 결과가 없어요" if self.folders else "아직 불러온 폴더가 없어요"
+            detail = "다른 이름으로 검색해 보세요. 선택한 폴더는 유지됩니다." if self.folders else "왼쪽에서 로그인한 뒤 폴더 스캔을 눌러 주세요."
+            empty = ctk.CTkFrame(self.folder_frame, fg_color="transparent")
+            empty.grid(row=0, column=0, pady=45, sticky="ew")
+            ctk.CTkLabel(empty, text="▤", font=ctk.CTkFont(size=44), text_color="#426582").pack(pady=(0, 10))
+            ctk.CTkLabel(empty, text=title, font=ctk.CTkFont(family="맑은 고딕", size=16, weight="bold"), text_color="#BFD0E4").pack()
+            ctk.CTkLabel(empty, text=detail, font=self.font_small, text_color="#91A4BD", wraplength=450).pack(pady=8)
+        for index, folder in enumerate(visible):
+            key = folder_key(folder)
+            row = ctk.CTkFrame(self.folder_frame, height=56, corner_radius=12, fg_color="#19293D", border_width=1, border_color="#31594F" if key in selected else "#26354D")
+            row.grid(row=index, column=0, padx=8, pady=4, sticky="ew")
+            row.grid_columnconfigure(1, weight=1)
+            checkbox = ctk.CTkCheckBox(row, text="", width=24, variable=variables[key], command=self._selection_changed, checkbox_width=20, checkbox_height=20, corner_radius=6, border_width=2, fg_color="#3FBCA5", hover_color="#319E8B", border_color="#57718D")
+            checkbox.grid(row=0, column=0, padx=(16, 10), pady=16, sticky="w")
+            name_label = ctk.CTkLabel(row, text=folder.name, anchor="w", justify="left", wraplength=460, font=self.font_body, text_color="#E1ECF8")
+            name_label.grid(row=0, column=1, pady=12, sticky="ew")
+            name_label.bind("<Button-1>", lambda event, cb=checkbox: cb.toggle() if cb.cget("state") == "normal" else None)
+            row.bind("<Configure>", lambda event, label=name_label: label.configure(wraplength=max(140, event.width - 130)))
+            ctk.CTkLabel(row, text="폴더", width=40, font=self.font_small, text_color="#7997B6").grid(row=0, column=2, padx=(8, 16))
+            self.folder_rows[key] = row
+            self.folder_checkboxes.append(checkbox)
+        self._update_selection_summary(len(visible))
+
+    def _selection_changed(self):
+        if self.sort_var.get() == "선택한 폴더 먼저":
+            self._refresh_folder_list()
+        else:
+            self._update_selection_summary()
+
+    def _update_selection_summary(self, visible_count=None):
+        selected = {folder_key(f) for var, f in self.folder_vars if var.get()}
+        total = len(self.folder_vars)
+        if visible_count is None:
+            visible_count = len(visible_folders(self.folders, selected, self.sort_var.get(), self.search_var.get()))
+        self.selection_label.configure(text=f"{len(selected)} / {total}개 선택")
+        self.folder_total_label.configure(text=f"전체 {total}개" + (f" · 표시 {visible_count}개" if visible_count != total else ""))
+        self.collect_btn.configure(text=f"  03   선택 폴더 수집  ({len(selected)}개)")
+        busy = self.update_busy or bool(self.worker and self.worker.is_alive())
+        self.collect_btn.configure(state="normal" if selected and not busy else "disabled")
+        for key, row in self.folder_rows.items():
+            row.configure(border_color="#31594F" if key in selected else "#26354D")
 
     def select_all(self):
         for var, _ in self.folder_vars:
             var.set(True)
+        self._selection_changed()
 
     def clear_selection(self):
         for var, _ in self.folder_vars:
             var.set(False)
+        self._selection_changed()
 
     def collect_selected(self):
         selected = [f for var, f in self.folder_vars if var.get()]
@@ -1594,6 +1687,9 @@ def main():
             lock.close()
             return
     try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("sopo9880.DagloTXT")
         app = App()
         if "--self-test" in sys.argv:
             app.update()
