@@ -2,7 +2,7 @@ name: Build and release Windows app
 on:
   push:
     branches: [main]
-    paths: [version.py]
+    paths: [version.py, '.github/workflows/release.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -22,10 +22,17 @@ jobs:
           cache-dependency-path: requirements*.txt
       - name: Install installer compiler
         shell: pwsh
-        run: choco install innosetup --version=6.7.3 --yes --no-progress
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $setup
+          if ((Get-AuthenticodeSignature $setup).Status -ne 'Valid') { throw 'Compiler signature invalid' }
+          $compiler = Join-Path $env:RUNNER_TEMP 'inno'
+          $p = Start-Process $setup -ArgumentList @('/CURRENTUSER','/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOICONS',('/DIR="' + $compiler + '"')) -PassThru -Wait -WindowStyle Hidden
+          if ($p.ExitCode -ne 0 -or -not (Test-Path "$compiler/ISCC.exe")) { throw 'Compiler setup failed' }
+          "DAGLO_ISCC=$compiler/ISCC.exe" >> $env:GITHUB_ENV
       - name: Build and verify
         shell: pwsh
-        run: ./build.ps1
+        run: ./build.ps1 -ISCC $env:DAGLO_ISCC
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
