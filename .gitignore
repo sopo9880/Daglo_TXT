@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+browsers/
+build/
+dist/
+release/
+output/
+profiles/
+config.json
+*.log

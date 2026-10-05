@@ -1,0 +1,23 @@
+{
+  "start_url": "https://daglo.ai/board",
+  "login_success_url": "https://daglo.ai/home",
+  "browser_channel": "chromium",
+  "headless": true,
+  "max_pages_per_folder": 20,
+  "delay_seconds_between_boards": 1.0,
+  "output_dir": "output",
+  "profile_dir": "profiles/daglo_chrome_profile",
+  "zip_after_collect": true,
+  "save_html_debug_on_failure": true,
+  "clean_ui_lines": false,
+  "copy_fallback_enabled": true,
+  "extraction_mode": "copy_button_only",
+  "min_transcript_chars": 100,
+  "validate_extracted_text": true,
+  "login_auto_close_on_success": false,
+  "low_focus_mode": true,
+  "interactive_hover_fallback": false,
+  "manifest_sync_zip_after": true,
+  "auto_check_updates": true,
+  "skipped_update": ""
+}
