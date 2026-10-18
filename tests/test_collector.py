@@ -53,6 +53,22 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "닫혔습니다"):
             self.collector._page_content(page)
 
+    def test_scan_folders_preserves_daglo_order_and_first_duplicate(self):
+        first = FolderInfo("다글로에서 두번째", "https://daglo.ai/board?folderIds=second", "second")
+        before = FolderInfo("다글로에서 첫번째", "https://daglo.ai/board?folderIds=first", "first")
+        last = FolderInfo("다글로에서 세번째", "https://daglo.ai/board?folderIds=third", "third")
+        duplicate = FolderInfo("중복 항목", "https://daglo.ai/board?folderIds=first", "first")
+        with (
+            patch("daglo_collector.sync_playwright"),
+            patch.object(self.collector, "_launch_context"),
+            patch.object(self.collector, "_soft_wait"),
+            patch.object(self.collector, "_detect_login_needed"),
+            patch.object(self.collector, "_extract_folders_from_dom", return_value=[before, first, duplicate, last]),
+        ):
+            result = self.collector.scan_folders()
+        self.assertEqual([f.folder_id for f in result], ["first", "second", "third"])
+        self.assertEqual(result[0].name, "다글로에서 첫번째")
+
     def test_zip_failure_keeps_previous_archive(self):
         folder = data_dir() / "run"
         folder.mkdir()
@@ -143,7 +159,7 @@ class CollectorTests(unittest.TestCase):
         from dataclasses import asdict
 
         root = data_dir() / "output"
-        root.mkdir()
+        root.mkdir(exist_ok=True)
         folder = FolderInfo("과목", "https://daglo.ai/board?folderIds=c", "c")
         board = BoardInfo("유실된강의", "https://daglo.ai/board/one?fileMetaId=one", "과목")
         (root / "manifest.json").write_text(json.dumps([{
@@ -157,7 +173,7 @@ class CollectorTests(unittest.TestCase):
 
     def test_incremental_zip_failure_preserves_existing_archive(self):
         root = data_dir() / "output"
-        root.mkdir()
+        root.mkdir(exist_ok=True)
         (root / "lecture.txt").write_text("text")
         archive = self.collector.zip_incremental_output()
         before = archive.read_bytes()

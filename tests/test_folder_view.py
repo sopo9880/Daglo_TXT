@@ -15,6 +15,21 @@ class FolderViewTests(unittest.TestCase):
         self.assertEqual([f.name for f in visible_folders(self.folders, set(), "이름 오름차순")], ["강의 1", "강의 2", "강의 10"])
         self.assertEqual([f.name for f in visible_folders(self.folders, set(), "이름 내림차순")], ["강의 10", "강의 2", "강의 1"])
 
+    def test_daglo_order_preserves_original_scan_order(self):
+        original_keys = [folder_key(f) for f in self.folders]
+        self.assertEqual(original_keys, ["ten", "two", "one"])
+        self.assertEqual(
+            [folder_key(f) for f in visible_folders(self.folders, {"one"}, "다글로 순서")],
+            original_keys,
+        )
+        self.assertEqual([folder_key(f) for f in self.folders], original_keys)
+
+    def test_daglo_order_with_search_keeps_relative_order(self):
+        folders = [folder("자료 C", "c"), folder("강의", "x"), folder("자료 A", "a")]
+        shown = visible_folders(folders, {"x"}, "다글로 순서", "자료")
+        self.assertEqual([folder_key(f) for f in shown], ["c", "a"])
+        self.assertEqual([folder_key(f) for f in folders], ["c", "x", "a"])
+
     def test_selected_first_with_natural_order(self):
         self.assertEqual([folder_key(f) for f in visible_folders(self.folders, {"ten"}, "선택한 폴더 먼저")], ["ten", "one", "two"])
 

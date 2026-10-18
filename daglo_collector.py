@@ -568,13 +568,14 @@ class DagloCollector:
                 folders = parse_folders_from_html(self._page_content(page))
             context.close()
 
-        # Deduplicate and sort by name.
+        # Deduplicate without changing the on-page order observed during scan.
+        # The UI applies alphabetical/selection sorts only when requested.
         unique: Dict[str, FolderInfo] = {}
         for f in folders:
             key = f.folder_id or f.url
             if key and key not in unique:
                 unique[key] = f
-        final = sorted(unique.values(), key=lambda x: x.name)
+        final = list(unique.values())
         self.log(f"폴더 {len(final)}개를 찾았습니다.")
         return final
 
