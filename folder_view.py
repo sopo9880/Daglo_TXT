@@ -2,7 +2,7 @@
 import re
 import unicodedata
 
-SORT_OPTIONS = ("이름 오름차순", "이름 내림차순", "선택한 폴더 먼저")
+SORT_OPTIONS = ("이름 오름차순", "이름 내림차순", "선택한 폴더 먼저", "다글로 순서")
 
 
 def folder_key(folder):
@@ -17,6 +17,9 @@ def natural_key(name):
 def visible_folders(folders, selected_keys, order, query=""):
     query = unicodedata.normalize("NFKC", query).casefold().strip()
     visible = [f for f in folders if query in unicodedata.normalize("NFKC", f.name).casefold()]
+    if order == "다글로 순서":
+        # Preserve the order returned by the Daglo folder scan.
+        return visible
     if order == "선택한 폴더 먼저":
         return sorted(visible, key=lambda f: (folder_key(f) not in selected_keys, natural_key(f.name), folder_key(f)))
     return sorted(visible, key=lambda f: (natural_key(f.name), folder_key(f)), reverse=order == "이름 내림차순")

@@ -6,8 +6,10 @@ Daglo Transcript Collector
 """
 from __future__ import annotations
 
+import filecmp
 import json
 import os
+import shutil
 import queue
 import re
 import subprocess
@@ -56,6 +58,7 @@ def load_config() -> Dict[str, Any]:
         "max_pages_per_folder": 20,
         "delay_seconds_between_boards": 1.0,
         "output_dir": "output",
+        "collect_mode": "new",
         "profile_dir": "profiles/daglo_chrome_profile",
         "zip_after_collect": True,
         "save_html_debug_on_failure": True,
@@ -565,13 +568,14 @@ class DagloCollector:
                 folders = parse_folders_from_html(self._page_content(page))
             context.close()
 
-        # Deduplicate and sort by name.
+        # Deduplicate without changing the on-page order observed during scan.
+        # The UI applies alphabetical/selection sorts only when requested.
         unique: Dict[str, FolderInfo] = {}
         for f in folders:
             key = f.folder_id or f.url
             if key and key not in unique:
                 unique[key] = f
-        final = sorted(unique.values(), key=lambda x: x.name)
+        final = list(unique.values())
         self.log(f"폴더 {len(final)}개를 찾았습니다.")
         return final
 
@@ -631,7 +635,11 @@ class DagloCollector:
             folders.append(FolderInfo(name=name, url=url, folder_id=fid))
         return folders
 
-    def collect_folders(self, folders: List[FolderInfo]) -> Path:
+    def collect_folders(self, folders: List[FolderInfo], mode: str = "new") -> Path:
+        if mode == "incremental":
+            return self.collect_folders_incremental(folders)
+        if mode != "new":
+            raise ValueError(f"알 수 없는 수집 모드: {mode}")
         if not folders:
             raise ValueError("수집할 폴더가 없습니다.")
         started = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -704,6 +712,223 @@ class DagloCollector:
             return zip_path
         self.log(f"수집 완료: {run_dir}")
         return run_dir
+
+    def _load_incremental_manifest(self) -> List[Dict[str, Any]]:
+        """Load cumulative metadata without treating missing/failed TXT as complete."""
+        path = self.output_dir / "manifest.json"
+        if not path.exists():
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise RuntimeError("output/manifest.json 형식이 올바르지 않습니다.")
+        return raw
+
+    def _import_legacy_runs(self, manifest: List[Dict[str, Any]]) -> int:
+        """Copy successful transcripts from dated runs into output/<folder>/.
+
+        Original runs remain untouched, and the copied files are tracked by board
+        identity so later incremental runs skip them without opening Daglo boards.
+        """
+        root = self.output_dir
+        known: set[str] = set()
+        for entry in manifest:
+            if entry.get("status") != "ok":
+                continue
+            board_url = (entry.get("board") or {}).get("url") or ""
+            saved_path = Path(str(entry.get("saved_path") or ""))
+            if (board_url and saved_path.suffix.lower() == ".txt"
+                    and not saved_path.is_absolute() and ".." not in saved_path.parts
+                    and (root / saved_path).is_file()):
+                known.add(board_key_from_url(board_url))
+
+        imported = 0
+        for old_run in sorted(root.iterdir()):
+            if not old_run.is_dir() or not re.fullmatch(r"daglo_transcripts_\d{8}_\d{6}", old_run.name):
+                continue
+            old_manifest = old_run / "manifest.json"
+            if not old_manifest.is_file():
+                continue
+            try:
+                entries = json.loads(old_manifest.read_text(encoding="utf-8-sig"))
+                if not isinstance(entries, list):
+                    raise ValueError("manifest must be a list")
+            except (OSError, ValueError, TypeError) as error:
+                self.log(f"기존 수집 기록 읽기 실패 ({old_run.name}): {error}")
+                continue
+
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("status") != "ok":
+                    continue
+                board_url = (entry.get("board") or {}).get("url") or ""
+                board_key = board_key_from_url(board_url) if board_url else ""
+                saved_path = Path(str(entry.get("saved_path") or ""))
+                if (not board_key or board_key in known
+                        or saved_path.is_absolute() or ".." in saved_path.parts
+                        or saved_path.suffix.lower() != ".txt" or len(saved_path.parts) < 2):
+                    continue
+                source = old_run / saved_path
+                if not source.is_file() or not source.resolve().is_relative_to(old_run.resolve()):
+                    continue
+
+                folder_info = entry.get("folder") or {}
+                name = str(folder_info.get("name") or saved_path.parts[0])
+                folder_dir = root / safe_filename(name, str(folder_info.get("folder_id") or "folder"))
+                folder_dir.mkdir(parents=True, exist_ok=True)
+                destination = folder_dir / source.name
+                if destination.exists() and not filecmp.cmp(source, destination, shallow=False):
+                    destination = self._unique_transcript_path(folder_dir, source.stem, board_url)
+                if not destination.exists():
+                    shutil.copy2(source, destination)
+                manifest.append({
+                    **entry,
+                    "saved_path": str(destination.relative_to(root)),
+                    "sync_reason": "imported_from_dated_run",
+                })
+                known.add(board_key)
+                imported += 1
+        return imported
+
+    def collect_folders_incremental(self, folders: List[FolderInfo]) -> Path:
+        """Collect missing TXT into output/<folder> and rebuild one cumulative ZIP."""
+        if not folders:
+            raise ValueError("수집할 폴더가 없습니다.")
+        root = self.output_dir
+        root.mkdir(parents=True, exist_ok=True)
+        manifest_path = root / "manifest.json"
+        manifest = self._load_incremental_manifest()
+        if manifest_path.exists():
+            backup = root / f"manifest.backup_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+            shutil.copy2(manifest_path, backup)
+
+        imported_count = self._import_legacy_runs(manifest)
+        if imported_count:
+            atomic_json(manifest_path, manifest)
+            self.log(f"기존 날짜별 수집 결과에서 {imported_count}개 TXT 통합 완료 (원본 보존)")
+
+        known: Dict[str, Dict[str, Any]] = {}
+        path_owners: Dict[str, str] = {}
+        folder_dirs: Dict[str, str] = {}
+        for entry in manifest:
+            if entry.get("status") != "ok":
+                continue
+            board_data = entry.get("board") or {}
+            folder_data = entry.get("folder") or {}
+            board_url = board_data.get("url") or ""
+            rel = Path(str(entry.get("saved_path") or ""))
+            if (not board_url or rel.is_absolute() or ".." in rel.parts
+                    or rel.suffix.lower() != ".txt" or not (root / rel).is_file()):
+                continue
+            key = board_key_from_url(board_url)
+            known[key] = entry
+            path_owners[rel.as_posix().casefold()] = key
+            folder_key = str(folder_data.get("folder_id") or folder_data.get("url") or folder_data.get("name") or "")
+            if folder_key and len(rel.parts) >= 2:
+                folder_dirs.setdefault(folder_key, rel.parts[0])
+
+        skipped_count = new_count = error_count = 0
+        with sync_playwright() as p:
+            context = self._launch_context(p, headless=bool(self.cfg.get("headless", False)))
+            page = context.pages[0] if context.pages else context.new_page()
+            self._detect_login_by_navigation(page)
+            try:
+                for folder_idx, folder in enumerate(folders, start=1):
+                    self.log(f"[{folder_idx}/{len(folders)}] 추가 수집 폴더 스캔: {folder.name}")
+                    boards = self.scan_boards_in_folder(page, folder)
+                    folder_key = folder.folder_id or folder.url or folder.name
+                    folder_dir_name = folder_dirs.get(folder_key) or safe_filename(folder.name, folder.folder_id or "folder")
+                    folder_dir = root / folder_dir_name
+                    folder_dir.mkdir(parents=True, exist_ok=True)
+                    folder_dirs[folder_key] = folder_dir_name
+
+                    for board_idx, board in enumerate(boards, start=1):
+                        key = board_key_from_url(board.url)
+                        if key in known:
+                            skipped_count += 1
+                            self.log(f"  [{board_idx}/{len(boards)}] 기존 수집 건너뜀: {board.title}")
+                            continue
+
+                        # For TXT created outside this app, match the same folder/title
+                        # only when another board in the manifest does not own the file.
+                        title = normalize_board_title(board.title) or board.title
+                        candidate = folder_dir / (safe_filename(title, board_id_from_url(board.url)) + ".txt")
+                        candidate_rel = candidate.relative_to(root).as_posix()
+                        if (candidate.is_file() and candidate.stat().st_size > 0
+                                and candidate_rel.casefold() not in path_owners):
+                            board.title = title
+                            entry = {
+                                "folder": asdict(folder), "board": asdict(board),
+                                "status": "ok", "saved_path": candidate_rel,
+                                "error": "", "sync_reason": "existing_txt",
+                            }
+                            manifest.append(entry)
+                            known[key] = entry
+                            path_owners[candidate_rel.casefold()] = key
+                            atomic_json(manifest_path, manifest)
+                            skipped_count += 1
+                            self.log(f"  [{board_idx}/{len(boards)}] 이미 있는 TXT 연결: {candidate_rel}")
+                            continue
+
+                        status, error_msg, saved_path = "ok", "", ""
+                        try:
+                            text, real_title = self.extract_transcript(page, board.url)
+                            title = normalize_board_title(real_title) or title
+                            board.title = title
+                            if not text or len(text.strip()) < 30:
+                                raise RuntimeError("추출된 텍스트가 너무 짧습니다.")
+                            file_path = self._unique_transcript_path(folder_dir, title, board.url)
+                            file_path.write_text(text.strip() + "\n", encoding="utf-8")
+                            saved_path = str(file_path.relative_to(root))
+                            new_count += 1
+                            self.log(f"  [{board_idx}/{len(boards)}] 신규 저장: {saved_path}")
+                        except Exception as error:
+                            status = "error"
+                            error_msg = f"{type(error).__name__}: {error}"
+                            error_count += 1
+                            self.log(f"  [{board_idx}/{len(boards)}] 수집 실패: {error_msg}")
+                        entry = {
+                            "folder": asdict(folder), "board": asdict(board),
+                            "status": status, "saved_path": saved_path,
+                            "error": error_msg, "sync_reason": "incremental_collection",
+                        }
+                        manifest.append(entry)
+                        if status == "ok":
+                            known[key] = entry
+                            path_owners[Path(saved_path).as_posix().casefold()] = key
+                        atomic_json(manifest_path, manifest)
+                        time.sleep(float(self.cfg.get("delay_seconds_between_boards", 0.6)))
+            finally:
+                context.close()
+
+        atomic_json(manifest_path, manifest)
+        self.log(f"추가 수집 결과: 기존 {skipped_count}개 건너뜀 / 신규 {new_count}개 / 실패 {error_count}개 / 과거 결과 통합 {imported_count}개")
+        if self.cfg.get("zip_after_collect", True):
+            archive = self.zip_incremental_output()
+            self.log(f"통합 ZIP 생성 완료: {archive}")
+            return archive
+        return root
+
+    def zip_incremental_output(self) -> Path:
+        """ZIP the flat output tree, excluding dated runs and previous archives."""
+        root = self.output_dir
+        archive = root / "DagloTXT_전체.zip"
+        temporary = root / ".DagloTXT_전체.zip.tmp"
+        try:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as zf:
+                for path in sorted(root.rglob("*")):
+                    if not path.is_file() or path.suffix.casefold() != ".txt":
+                        continue
+                    rel = path.relative_to(root)
+                    if any(re.fullmatch(r"daglo_transcripts_\d{8}_\d{6}", part) for part in rel.parts[:-1]):
+                        continue
+                    zf.write(path, rel.as_posix())
+                metadata = root / "manifest.json"
+                if metadata.is_file():
+                    zf.write(metadata, "manifest.json")
+            temporary.replace(archive)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        return archive
 
     def retry_missing_from_manifest(self, manifest_path: str | Path) -> Path:
         """Scan the current Daglo folders from an existing manifest and collect only new boards.
@@ -1322,6 +1547,16 @@ class App(ctk.CTk):
         self.zip_var = ctk.BooleanVar(value=bool(self.cfg.get("zip_after_collect", True)))
         self.zip_check = ctk.CTkCheckBox(settings, text="완료 후 ZIP 생성", variable=self.zip_var, command=self._on_zip_change, **check_style)
         self.zip_check.grid(row=6, column=0, pady=(12, 8), sticky="w")
+        ctk.CTkLabel(settings, text="선택 폴더 수집 모드", font=self.font_small, text_color="#91A4BD", anchor="w").grid(row=7, column=0, pady=(14, 7), sticky="ew")
+        mode = self.cfg.get("collect_mode", "new")
+        self.collect_mode_var = ctk.StringVar(value=mode if mode in {"new", "incremental"} else "new")
+        self.mode_new_radio = ctk.CTkRadioButton(settings, text="새로 수집 (기존 방식)", variable=self.collect_mode_var, value="new", command=self._on_collect_mode_change, font=self.font_small, text_color="#BFD0E4")
+        self.mode_new_radio.grid(row=8, column=0, pady=(2, 7), sticky="w")
+        self.mode_incremental_radio = ctk.CTkRadioButton(settings, text="추가 수집 (누락된 TXT)", variable=self.collect_mode_var, value="incremental", command=self._on_collect_mode_change, font=self.font_small, text_color="#BFD0E4")
+        self.mode_incremental_radio.grid(row=9, column=0, pady=(2, 7), sticky="w")
+        self.mode_help = ctk.CTkLabel(settings, text="", font=self.font_small, text_color="#91A4BD", wraplength=215, justify="left", anchor="w")
+        self.mode_help.grid(row=10, column=0, pady=(0, 8), sticky="ew")
+        self._refresh_mode_help()
 
         footer = ctk.CTkFrame(sidebar, fg_color="transparent")
         footer.grid(row=3, column=0, padx=20, pady=(8, 20), sticky="ew")
@@ -1438,7 +1673,7 @@ class App(ctk.CTk):
 
     def _set_buttons(self, enabled: bool):
         state = "normal" if enabled else "disabled"
-        for b in [self.login_btn, self.scan_btn, self.collect_btn, self.retry_btn, self.select_all_btn, self.clear_btn, self.browse_btn, self.browser_menu, self.headless_check, self.zip_check, self.out_entry, self.update_btn, self.search_entry, self.sort_menu, self.auto_update_check, *self.folder_checkboxes]:
+        for b in [self.login_btn, self.scan_btn, self.collect_btn, self.retry_btn, self.select_all_btn, self.clear_btn, self.browse_btn, self.browser_menu, self.headless_check, self.zip_check, self.mode_new_radio, self.mode_incremental_radio, self.out_entry, self.update_btn, self.search_entry, self.sort_menu, self.auto_update_check, *self.folder_checkboxes]:
             b.configure(state=state)
         if enabled:
             self._update_selection_summary()
@@ -1448,6 +1683,7 @@ class App(ctk.CTk):
         self.cfg["headless"] = bool(self.headless_var.get())
         self.cfg["output_dir"] = self.out_entry.get().strip() or "output"
         self.cfg["zip_after_collect"] = bool(self.zip_var.get())
+        self.cfg["collect_mode"] = self.collect_mode_var.get()
         self.cfg["folder_sort"] = self.sort_var.get()
         self.cfg["auto_check_updates"] = bool(self.auto_update_var.get())
         save_config(self.cfg)
@@ -1460,6 +1696,17 @@ class App(ctk.CTk):
 
     def _on_zip_change(self):
         self._save_cfg_from_ui()
+
+    def _refresh_mode_help(self):
+        detail = ("기존 TXT는 유지하고 output/과목명에 누락된 파일만 저장합니다. 완료 후 통합 ZIP을 갱신합니다."
+                  if self.collect_mode_var.get() == "incremental"
+                  else "실행 날짜별 폴더에 선택한 녹취록을 새로 저장합니다.")
+        self.mode_help.configure(text=detail)
+
+    def _on_collect_mode_change(self):
+        self._save_cfg_from_ui()
+        self._refresh_mode_help()
+        self._update_selection_summary()
 
     def pick_output_dir(self):
         path = filedialog.askdirectory(title="녹취록 저장 폴더 선택")
@@ -1629,7 +1876,8 @@ class App(ctk.CTk):
             visible_count = len(visible_folders(self.folders, selected, self.sort_var.get(), self.search_var.get()))
         self.selection_label.configure(text=f"{len(selected)} / {total}개 선택")
         self.folder_total_label.configure(text=f"전체 {total}개" + (f" · 표시 {visible_count}개" if visible_count != total else ""))
-        self.collect_btn.configure(text=f"  03   선택 폴더 수집  ({len(selected)}개)")
+        action_label = "선택 폴더 추가 수집" if self.collect_mode_var.get() == "incremental" else "선택 폴더 수집"
+        self.collect_btn.configure(text=f"  03   {action_label}  ({len(selected)}개)")
         busy = self.update_busy or bool(self.worker and self.worker.is_alive())
         self.collect_btn.configure(state="normal" if selected and not busy else "disabled")
         for key, row in self.folder_rows.items():
@@ -1652,7 +1900,7 @@ class App(ctk.CTk):
             return
 
         def task():
-            result = DagloCollector(self.cfg, self._log).collect_folders(selected)
+            result = DagloCollector(self.cfg, self._log).collect_folders(selected, mode=self.collect_mode_var.get())
             self._log(f"결과 위치: {result}")
         self._run_worker("녹취록 수집", task)
 

@@ -6,6 +6,7 @@
   "max_pages_per_folder": 20,
   "delay_seconds_between_boards": 1.0,
   "output_dir": "output",
+  "collect_mode": "new",
   "profile_dir": "profiles/daglo_chrome_profile",
   "zip_after_collect": true,
   "save_html_debug_on_failure": true,
