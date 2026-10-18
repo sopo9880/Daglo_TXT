@@ -64,6 +64,109 @@ class CollectorTests(unittest.TestCase):
                 self.collector.zip_output(folder)
         self.assertEqual(archive.read_bytes(), original)
 
+    def test_incremental_skips_existing_txt_and_creates_flat_archive(self):
+        from zipfile import ZipFile
+
+        root = data_dir() / "output"
+        folder_dir = root / "운영체제"
+        folder_dir.mkdir(parents=True)
+        existing = folder_dir / "1주차.txt"
+        existing.write_text("old content", encoding="utf-8")
+        folder = FolderInfo("운영체제", "https://daglo.ai/board?folderIds=os", "os")
+        old = BoardInfo("1주차", "https://daglo.ai/board/one?fileMetaId=one", "운영체제")
+        new = BoardInfo("2주차", "https://daglo.ai/board/two?fileMetaId=two", "운영체제")
+        with patch("daglo_collector.sync_playwright"), patch.object(self.collector, "_launch_context"), patch.object(self.collector, "_detect_login_by_navigation"), patch.object(self.collector, "scan_boards_in_folder", return_value=[old, new]), patch.object(self.collector, "extract_transcript", return_value=("n" * 60, "2주차")) as extract, patch("daglo_collector.time.sleep"):
+            archive = self.collector.collect_folders([folder], mode="incremental")
+        self.assertEqual(extract.call_count, 1)
+        self.assertEqual(existing.read_text(encoding="utf-8"), "old content")
+        self.assertEqual((folder_dir / "2주차.txt").read_text(encoding="utf-8"), "n" * 60 + "\n")
+        self.assertEqual(archive, root / "DagloTXT_전체.zip")
+        self.assertFalse(list(root.glob("daglo_transcripts_*")))
+        with ZipFile(archive) as zf:
+            self.assertEqual(set(zf.namelist()), {"운영체제/1주차.txt", "운영체제/2주차.txt", "manifest.json"})
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(manifest), 2)
+
+        with patch("daglo_collector.sync_playwright"), patch.object(self.collector, "_launch_context"), patch.object(self.collector, "_detect_login_by_navigation"), patch.object(self.collector, "scan_boards_in_folder", return_value=[old, new]), patch.object(self.collector, "extract_transcript") as extract:
+            self.collector.collect_folders([folder], mode="incremental")
+        extract.assert_not_called()
+        self.assertEqual(len(json.loads((root / "manifest.json").read_text(encoding="utf-8"))), 2)
+
+    def test_incremental_imports_legacy_run_without_overwriting(self):
+        from dataclasses import asdict
+        from zipfile import ZipFile
+
+        root = data_dir() / "output"
+        run = root / "daglo_transcripts_20261013_113210"
+        old_dir = run / "데이터베이스"
+        old_dir.mkdir(parents=True)
+        original = old_dir / "1강.txt"
+        original.write_text("legacy content", encoding="utf-8")
+        folder = FolderInfo("데이터베이스", "https://daglo.ai/board?folderIds=db", "db")
+        board = BoardInfo("1강", "https://daglo.ai/board/old?fileMetaId=old", "데이터베이스")
+        (run / "manifest.json").write_text(json.dumps([{
+            "folder": asdict(folder), "board": asdict(board),
+            "status": "ok", "saved_path": "데이터베이스/1강.txt", "error": "",
+        }], ensure_ascii=False), encoding="utf-8")
+
+        with patch("daglo_collector.sync_playwright"), patch.object(self.collector, "_launch_context"), patch.object(self.collector, "_detect_login_by_navigation"), patch.object(self.collector, "scan_boards_in_folder", return_value=[board]), patch.object(self.collector, "extract_transcript") as extract:
+            archive = self.collector.collect_folders_incremental([folder])
+        extract.assert_not_called()
+        self.assertEqual(original.read_text(encoding="utf-8"), "legacy content")
+        self.assertEqual((root / "데이터베이스" / "1강.txt").read_text(encoding="utf-8"), "legacy content")
+        with ZipFile(archive) as zf:
+            self.assertIn("데이터베이스/1강.txt", zf.namelist())
+            self.assertNotIn("daglo_transcripts_20261013_113210/데이터베이스/1강.txt", zf.namelist())
+
+    def test_incremental_same_title_different_board_keeps_both(self):
+        from dataclasses import asdict
+
+        root = data_dir() / "output"
+        folder_dir = root / "과목"
+        folder_dir.mkdir(parents=True)
+        first_file = folder_dir / "강의.txt"
+        first_file.write_text("first original", encoding="utf-8")
+        folder = FolderInfo("과목", "https://daglo.ai/board?folderIds=c", "c")
+        first = BoardInfo("강의", "https://daglo.ai/board/first?fileMetaId=first", "과목")
+        second = BoardInfo("강의", "https://daglo.ai/board/second?fileMetaId=second", "과목")
+        (root / "manifest.json").write_text(json.dumps([{
+            "folder": asdict(folder), "board": asdict(first),
+            "status": "ok", "saved_path": "과목/강의.txt", "error": "",
+        }], ensure_ascii=False), encoding="utf-8")
+        with patch("daglo_collector.sync_playwright"), patch.object(self.collector, "_launch_context"), patch.object(self.collector, "_detect_login_by_navigation"), patch.object(self.collector, "scan_boards_in_folder", return_value=[first, second]), patch.object(self.collector, "extract_transcript", return_value=("b" * 60, "강의")) as extract, patch("daglo_collector.time.sleep"):
+            self.collector.collect_folders_incremental([folder])
+        self.assertEqual(extract.call_count, 1)
+        self.assertEqual(first_file.read_text(encoding="utf-8"), "first original")
+        self.assertEqual((folder_dir / "강의_second.txt").read_text(encoding="utf-8"), "b" * 60 + "\n")
+
+    def test_incremental_missing_manifest_txt_is_retried(self):
+        from dataclasses import asdict
+
+        root = data_dir() / "output"
+        root.mkdir()
+        folder = FolderInfo("과목", "https://daglo.ai/board?folderIds=c", "c")
+        board = BoardInfo("유실된강의", "https://daglo.ai/board/one?fileMetaId=one", "과목")
+        (root / "manifest.json").write_text(json.dumps([{
+            "folder": asdict(folder), "board": asdict(board),
+            "status": "ok", "saved_path": "과목/유실된강의.txt", "error": "",
+        }], ensure_ascii=False), encoding="utf-8")
+        with patch("daglo_collector.sync_playwright"), patch.object(self.collector, "_launch_context"), patch.object(self.collector, "_detect_login_by_navigation"), patch.object(self.collector, "scan_boards_in_folder", return_value=[board]), patch.object(self.collector, "extract_transcript", return_value=("new text " * 8, "유실된강의")) as extract, patch("daglo_collector.time.sleep"):
+            self.collector.collect_folders_incremental([folder])
+        extract.assert_called_once()
+        self.assertTrue((root / "과목" / "유실된강의.txt").is_file())
+
+    def test_incremental_zip_failure_preserves_existing_archive(self):
+        root = data_dir() / "output"
+        root.mkdir()
+        (root / "lecture.txt").write_text("text")
+        archive = self.collector.zip_incremental_output()
+        before = archive.read_bytes()
+        with patch("daglo_collector.zipfile.ZipFile.write", side_effect=OSError("disk error")):
+            with self.assertRaises(OSError):
+                self.collector.zip_incremental_output()
+        self.assertEqual(archive.read_bytes(), before)
+        self.assertFalse((root / ".DagloTXT_전체.zip.tmp").exists())
+
     def test_sync_adds_only_new_without_overwriting(self):
         run = data_dir() / "run"
         (run / "course").mkdir(parents=True)
